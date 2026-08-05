@@ -1,0 +1,58 @@
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["app"]
+
+[tool.ruff.lint]
+select = [
+    "E",      # pycodestyle errors
+    "W",      # pycodestyle warnings
+    "F",      # pyflakes
+    "I",      # isort
+    "UP",     # pyupgrade
+    "B",      # bugbear
+    "ASYNC",  # async pitfalls
+    "S",      # bandit (security)
+    "N",      # naming
+    "RUF",
+]
+ignore = [
+    # Кириллица в докстрингах/строках/комментариях: проект документирован по-русски
+    "RUF001",
+    "RUF002",
+    "RUF003",
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app"]
+
+[tool.ruff.lint.per-file-ignores]
+# random здесь — осознанная эмуляция шлюза, не криптография
+"app/workers/gateway.py" = ["S311"]
+# __mapper_args__ — идиома SQLAlchemy; ClassVar-аннотация конфликтует с типами DeclarativeBase
+"app/models/*" = ["RUF012"]
+# В тестах: assert — норма, «секреты» фиктивны, timeout в хелперах ожидания уместен,
+# приватные атрибуты проверяются намеренно
+"tests/*" = ["S101", "S105", "S106", "S110", "ASYNC109", "SLF001"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Корень проекта в sys.path: иначе `pytest` (в отличие от `python -m pytest`)
+# не находит пакет app
+pythonpath = ["."]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+markers = ["integration: требует Docker (поднимает Postgres и RabbitMQ)"]
+
+[tool.mypy]
+python_version = "3.12"
+disallow_untyped_defs = true
+check_untyped_defs = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = "asyncpg.*"
+ignore_missing_imports = true

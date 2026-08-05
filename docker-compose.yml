@@ -1,0 +1,98 @@
+name: payment-processing-service
+
+x-app-image: &app-image
+  build: .
+  image: payment-processing-service:local
+
+x-app-env: &app-env
+  API_KEY: ${API_KEY:-supersecret-dev-key}
+  DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://payments:payments@postgres:5432/payments}
+  RABBITMQ_URL: ${RABBITMQ_URL:-amqp://guest:guest@rabbitmq:5672/}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  GATEWAY_MIN_DELAY_SECONDS: ${GATEWAY_MIN_DELAY_SECONDS:-2}
+  GATEWAY_MAX_DELAY_SECONDS: ${GATEWAY_MAX_DELAY_SECONDS:-5}
+  GATEWAY_SUCCESS_RATE: ${GATEWAY_SUCCESS_RATE:-0.9}
+  WEBHOOK_TIMEOUT_SECONDS: ${WEBHOOK_TIMEOUT_SECONDS:-5}
+  WEBHOOK_SIGNING_SECRET: ${WEBHOOK_SIGNING_SECRET:-dev-webhook-signing-secret}
+  # Точечное исключение для демо-приёмника во внутренней сети compose. Остальные
+  # приватные адреса (включая 169.254.169.254) остаются запрещены.
+  WEBHOOK_ALLOWED_HOSTS: ${WEBHOOK_ALLOWED_HOSTS:-webhook-sink}
+  CONSUMER_MAX_RETRIES: ${CONSUMER_MAX_RETRIES:-3}
+  RETRY_BASE_DELAY_SECONDS: ${RETRY_BASE_DELAY_SECONDS:-2}
+  OUTBOX_POLL_INTERVAL_SECONDS: ${OUTBOX_POLL_INTERVAL_SECONDS:-0.5}
+  OUTBOX_BATCH_SIZE: ${OUTBOX_BATCH_SIZE:-100}
+  OUTBOX_RETRY_BASE_DELAY_SECONDS: ${OUTBOX_RETRY_BASE_DELAY_SECONDS:-1}
+  OUTBOX_RETRY_MAX_DELAY_SECONDS: ${OUTBOX_RETRY_MAX_DELAY_SECONDS:-60}
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-payments}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-payments}
+      POSTGRES_DB: ${POSTGRES_DB:-payments}
+    # порт наружу не публикуется (на хосте 5432 часто занят);
+    # отладка: docker compose exec postgres psql -U payments -d payments
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-payments} -d $${POSTGRES_DB:-payments}"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    ports:
+      - "5672:5672"
+      - "15672:15672"   # management UI: guest / guest
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  api:
+    <<: *app-image
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    ports:
+      - "8000:8000"
+    environment: *app-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/readyz', timeout=5)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+    restart: unless-stopped
+
+  consumer:
+    <<: *app-image
+    command: faststream run app.workers.consumer:app
+    environment: *app-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Демо-приёмник webhook'ов: укажите webhook_url=http://webhook-sink:9000/webhook
+  # и смотрите уведомления в docker compose logs -f webhook-sink
+  webhook-sink:
+    <<: *app-image
+    command: python scripts/webhook_receiver.py
+    ports:
+      - "9000:9000"
+    # Тот же секрет, что у отправителя: приёмник проверяет подпись и пишет
+    # результат в лог полем signature
+    environment: *app-env
+    restart: unless-stopped
+
+volumes:
+  pgdata:
